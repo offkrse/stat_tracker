@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.1"
+VersionStatTracker = "0.2"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -53,14 +53,10 @@ s3_client = boto3.client(
 
 
 class AccountInfo:
-    """
-    Один рекламный кабинет VK Ads.
-    Привязан к токену и (опционально) имени кабинета.
-    """
 
     def __init__(self, token: str, name: str = ""):
         self.token = token
-        self.name = name or "unknown_account"
+        self.name = name
         self.base_url = "https://ads.vk.com/api/v2"
         self.headers = {"Authorization": f"Bearer {self.token}"}
 
@@ -361,14 +357,16 @@ def load_accounts_from_env() -> List[AccountInfo]:
 
 
 if __name__ == "__main__":
-    logging.info("=== Stat tracker started ===")
-    accounts = load_accounts_from_env()
+    ACCOUNTS = [
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MAIN"),
+            name="MAIN",
+        ),
+    ]
 
-    if not accounts:
-        logging.error("No accounts to process. Exiting.")
-    else:
-        tracker = StatTracker(accounts)
-        df = tracker.collect_data()
-        tracker.save_parquet(df)
-        tracker.upload_to_s3()
-        logging.info("=== Stat tracking completed ===")
+
+    tracker = StatTracker(ACCOUNTS)
+    df = tracker.collect_data()
+    tracker.save_parquet(df)
+    tracker.upload_to_s3()
+    logging.info("Stat tracking completed.")
