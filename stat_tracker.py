@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.3"
+VersionStatTracker = "0.4"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -189,50 +189,38 @@ class StatTracker:
             },
         )
 
-        # map: banner_id -> данные группы + таргетинги
-        banner_to_group: Dict[int, Dict[str, Any]] = {}
+        # map: group_id -> данные группы + компания
+        group_info_map: Dict[int, Dict[str, Any]] = {}
+        
         for g in groups:
             gid = g.get("id")
+            if not gid:
+                continue
+            
             targetings = g.get("targetings", {})
-
-            age_str = self._parse_age(targetings)
-            geo_str = self._join_or_zero(targetings.get("geo", {}).get("regions"))
-            interests_str = self._join_or_zero(targetings.get("interests"))
-            segments_str = self._join_or_zero(targetings.get("segments"))
-            sex_values = targetings.get("sex") or []
-            sex_str = self._join_or_zero(sex_values)
-
-            group_base = {
+        
+            group_info_map[gid] = {
                 "id_group": gid,
                 "name_group": g.get("name"),
                 "created_group": g.get("created"),
                 "status_group": g.get("status"),
                 "budget_limit_day_group": g.get("budget_limit_day"),
-                "age": age_str,
-                "geo": geo_str,
-                "interests": interests_str,
-                "id_segments": segments_str,
-                "sex": sex_str,
+                "age": self._parse_age(targetings),
+                "geo": self._join_or_zero(targetings.get("geo", {}).get("regions")),
+                "interests": self._join_or_zero(targetings.get("interests")),
+                "id_segments": self._join_or_zero(targetings.get("segments")),
+                "sex": self._join_or_zero(targetings.get("sex")),
             }
-
-            # прикрепляем компанию, если есть
-            company_info = group_to_company.get(gid, {})
-            group_base.update(company_info)
-
-            banners = g.get("banners") or []
-            for b in banners:
-                bid = b.get("id")
-                if not bid:
-                    continue
-                banner_to_group[bid] = group_base
-
+        
+            # добавить данные компании
+            group_info_map[gid].update(group_to_company.get(gid, {}))
         # ===== БАННЕРЫ =====
         banners = acc.get_paginated(
             "/banners.json",
             {
                 "limit": 200,
                 "_status__ne": "deleted",
-                "fields": "id,name,created,status,content,moderation_status,textblocks",
+                "fields": "id,name,created,status,content,moderation_status,textblocks,ad_group_id",
             },
         )
 
@@ -279,7 +267,8 @@ class StatTracker:
             base_record["id_video"] = video.get("id", 0)
 
             # данные группы/кампании
-            group_info = banner_to_group.get(ban_id, {})
+            group_id = ban.get("ad_group_id")
+            group_info = group_info_map.get(group_id, {})
             base_record.update(group_info)
 
             # статистика
