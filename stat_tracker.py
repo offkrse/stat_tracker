@@ -349,9 +349,9 @@ class StatTracker:
         if not os.path.exists(PARQUET_PATH):
             logging.warning("Parquet file does not exist, nothing to upload.")
             return
-
-        key_prefix = "stat_tracker_parquet/"
-        key = key_prefix + "stat_tracker.parquet"
+            
+        timestamp = datetime.now().strftime("%d_%m_%Y_%H-%M-%S")
+        key = f"stat_tracker_parquet/stat_tracker_{timestamp}.parquet"
 
         # Удаляем предыдущие parquet в этой папке
         try:
