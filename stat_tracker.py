@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.4"
+VersionStatTracker = "0.5"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -341,15 +341,6 @@ class StatTracker:
             
         timestamp = datetime.now().strftime("%d_%m_%Y_%H-%M-%S")
         key = f"stat_tracker_parquet/stat_tracker_{timestamp}.parquet"
-
-        # Удаляем предыдущие parquet в этой папке
-        try:
-            resp = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=key_prefix)
-            for obj in resp.get("Contents", []):
-                s3_client.delete_object(Bucket=S3_BUCKET, Key=obj["Key"])
-                logging.info(f"Deleted old parquet from S3: {obj['Key']}")
-        except Exception as e:
-            logging.error(f"Failed to list/delete old parquet in S3: {e}")
 
         # Заливаем новый
         try:
