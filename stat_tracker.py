@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.2"
+VersionStatTracker = "0.3"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -62,13 +62,44 @@ class AccountInfo:
 
     def fetch(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}{endpoint}"
-        try:
-            r = requests.get(url, headers=self.headers, params=params, timeout=30)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            logging.error(f"[{self.name}] Error fetching {url}: {e}")
-            return None
+        max_attempts = 5
+        backoff = 2  # seconds
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = requests.get(url, headers=self.headers, params=params, timeout=30)
+
+                # Flood control: VK sends HTTP 429
+                if r.status_code == 429:
+                    retry_after = int(r.headers.get("Retry-After", backoff))
+                    logging.warning(
+                        f"[{self.name}] 429 Flood limit on {url}, retrying in {retry_after}s (attempt {attempt}/{max_attempts})"
+                    )
+                    time.sleep(retry_after)
+                    continue
+
+                # Server errors
+                if r.status_code >= 500:
+                    logging.warning(
+                        f"[{self.name}] Server error {r.status_code} on {url}, retrying in {backoff}s (attempt {attempt}/{max_attempts})"
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+
+                r.raise_for_status()
+                return r.json()
+
+            except requests.exceptions.RequestException as e:
+                logging.error(
+                    f"[{self.name}] Network/API error on {url}: {e} (attempt {attempt}/{max_attempts})"
+                )
+                time.sleep(backoff)
+                backoff *= 2
+
+        logging.error(f"[{self.name}] FAILED all retries for {url}")
+        return None
+
 
     def get_paginated(self, endpoint: str, base_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         all_items: List[Dict[str, Any]] = []
