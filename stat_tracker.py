@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.6"
+VersionStatTracker = "0.7"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -149,7 +149,7 @@ class StatTracker:
         return ",".join(str(v) for v in values)
 
     def collect_data_for_account(self, acc: AccountInfo) -> List[Dict[str, Any]]:
-        snapshot_at = datetime.utcnow().isoformat()
+        snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
         records: List[Dict[str, Any]] = []
 
         # ===== КАМПАНИИ (COMPANY) =====
@@ -340,7 +340,7 @@ class StatTracker:
             logging.warning("Parquet file does not exist, nothing to upload.")
             return
             
-        timestamp = datetime.now().strftime("%d_%m_%Y_%H-%M-%S")
+        timestamp = (datetime.utcnow() + timedelta(hours=4)).strftime("%d_%m_%Y_%H-%M-%S")
         key = f"stat_tracker_parquet/stat_tracker_{timestamp}.parquet"
 
         # Заливаем новый
