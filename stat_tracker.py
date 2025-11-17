@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.8.5"
+VersionStatTracker = "0.9"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -288,18 +288,88 @@ class StatTracker:
             
             # ===== IMAGES =====
             content = ban.get("content", {}) or {}
-            image600 = content.get("image_600x600", {}) or {}
+            
+            # список всех найденных id и URL
+            image_ids = []
+            image_urls = []
+            
+            # приоритетная картинка
+            image600 = content.get("image_600x600")
+            if image600:
+                variants = image600.get("variants", {}) or {}
+                url = variants.get("original", {}).get("url")
+                if url:
+                    image_ids.append(str(image600.get("id", "")))
+                    image_urls.append(url)
+            
+            # если image_600x600 нет — ищем ВСЕ image_*
+            if not image_ids:
+                for key, img in content.items():
+                    if not key.startswith("image_"):
+                        continue
+                    
+                    if not isinstance(img, dict):
+                        continue
+                    
+                    img_id = img.get("id")
+                    variants = img.get("variants", {}) or {}
+                    url = variants.get("original", {}).get("url")
+            
+                    if img_id and url:
+                        image_ids.append(str(img_id))
+                        image_urls.append(url)
+            
+            # формируем значения
+            id_image = ",".join(image_ids) if image_ids else "0"
+            image_url = ",".join(image_urls) if image_urls else "0"
 
-            id_image = image600.get("id", 0)
-            variants = image600.get("variants", {}) or {}
-            image_url = variants.get("original", {}).get("url", "0")
             
             # ===== VIDEO =====
-            video_block = content.get("video_portrait_9_16_180s", {}) or {}
-            video_internal = video_block.get("variants", {}).get("internal", {}) if video_block else {}
+            video_ids = []
+            video_urls = []
             
-            id_video = video_block.get("id", 0)
-            video_url = video_internal.get("url", "0")
+            # сначала проверяем приоритетный ключ, если он есть
+            video0 = content.get("video_portrait_9_16_180s")
+            if video0:
+                vid = video0.get("id")
+                internal = video0.get("variants", {}).get("internal", {})
+                url = internal.get("url")
+            
+                if vid:
+                    video_ids.append(str(vid))
+                if url:
+                    video_urls.append(url)
+            
+            # если ничего не найдено → ищем ВСЕ ключи, начинающиеся на video_
+            if not video_urls:
+                for key, video in content.items():
+                    if not key.startswith("video_"):
+                        continue
+                    
+                    if not isinstance(video, dict):
+                        continue
+                    
+                    vid = video.get("id")
+                    variants = video.get("variants", {}) or {}
+                    internal = variants.get("internal", {}) or {}
+                    url = internal.get("url")
+            
+                    # если нет internal → пробуем любой вариант
+                    if not url:
+                        for v in variants.values():
+                            if isinstance(v, dict) and v.get("url"):
+                                url = v["url"]
+                                break
+                            
+                    if vid:
+                        video_ids.append(str(vid))
+                    if url:
+                        video_urls.append(url)
+            
+            # Собираем результат
+            id_video = ",".join(video_ids) if video_ids else "0"
+            video_url = ",".join(video_urls) if video_urls else "0"
+            
             
             # ===== ДАННЫЕ ГРУППЫ/КАМПАНИИ =====
             group_id = ban.get("ad_group_id")
