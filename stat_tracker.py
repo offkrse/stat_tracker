@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.7"
+VersionStatTracker = "0.8"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -253,24 +253,39 @@ class StatTracker:
                 "created_banner": ban.get("created"),
             }
 
-            # текстовые поля
+            # ===== TEXTBLOCKS =====
             tb = ban.get("textblocks", {}) or {}
-            base_record.update(
-                {
-                    "title": tb.get("title_40_vkads", {}).get("text", "0"),
-                    "text_long": tb.get("text_220", {}).get("text", "0"),
-                    "text_short": tb.get("text_90", {}).get("text", "0"),
-                }
+            
+            title = tb.get("title_40_vkads", {}).get("text", "0")
+            text_short = tb.get("text_90", {}).get("text", "0")
+            
+            # text_2000 > text_220 > 0
+            text_long = (
+                tb.get("text_2000", {}).get("text")
+                or tb.get("text_220", {}).get("text")
+                or "0"
             )
+            
+            # ===== IMAGES =====
+            content = ban.get("content", {}) or {}
+            image600 = content.get("image_600x600", {}) or {}
 
-            # video id
-            video = (ban.get("content") or {}).get("video_portrait_9_16_180s", {}) or {}
-            base_record["id_video"] = video.get("id", 0)
-
-            # данные группы/кампании
+            id_image = image600.get("id", 0)
+            variants = image600.get("variants", {}) or {}
+            image_url = variants.get("original", {}).get("url", "0")
+            
+            # ===== VIDEO =====
+            video_block = content.get("video_portrait_9_16_180s", {}) or {}
+            video_internal = video_block.get("variants", {}).get("internal", {}) if video_block else {}
+            
+            id_video = video_block.get("id", 0)
+            video_url = video_internal.get("url", "0")
+            
+            # ===== ДАННЫЕ ГРУППЫ/КАМПАНИИ =====
             group_id = ban.get("ad_group_id")
             group_info = group_info_map.get(group_id, {})
             base_record.update(group_info)
+
 
             # статистика
             s = stats_map.get(ban_id, {})
@@ -289,6 +304,13 @@ class StatTracker:
                     "goals": vk_stats.get("goals", 0),
                     "cpa": float(vk_stats.get("cpa", 0) or 0),
                     "cr": float(vk_stats.get("cr", 0) or 0),
+                    "title": title or "0",
+                    "text_short": text_short or "0",
+                    "text_long": text_long or "0",
+                    "id_video": id_video or 0,
+                    "video_url": video_url or "0",
+                    "id_image": id_image or 0,
+                    "image_url": image_url or "0",
                     "viewed_25_percent_rate": float(video_stats.get("viewed_25_percent_rate", 0) or 0),
                     "viewed_50_percent_rate": float(video_stats.get("viewed_50_percent_rate", 0) or 0),
                     "viewed_75_percent_rate": float(video_stats.get("viewed_75_percent_rate", 0) or 0),
