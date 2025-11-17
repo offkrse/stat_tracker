@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.8"
+VersionStatTracker = "0.8.5"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -256,15 +256,35 @@ class StatTracker:
             # ===== TEXTBLOCKS =====
             tb = ban.get("textblocks", {}) or {}
             
-            title = tb.get("title_40_vkads", {}).get("text", "0")
-            text_short = tb.get("text_90", {}).get("text", "0")
+            # === TITLE ===
+            title = tb.get("title_40_vkads", {}).get("text") or "0"
             
-            # text_2000 > text_220 > 0
+            # === SHORT TEXT (короткий) ===
+            text_short = (
+                tb.get("text_90", {}).get("text")
+                or tb.get("text_50", {}).get("text")
+                or "0"
+            )
+            
+            # === LONG TEXT (длинный) ===
             text_long = (
                 tb.get("text_2000", {}).get("text")
                 or tb.get("text_220", {}).get("text")
-                or "0"
+                or tb.get("text_90", {}).get("text")
+                or tb.get("text_50", {}).get("text")
             )
+            
+            # === Если не нашли long — ищем любой text_* ===
+            if not text_long or text_long == "":
+                for k, v in tb.items():
+                    if k.startswith("text_") and isinstance(v, dict) and "text" in v:
+                        if v.get("text"):
+                            text_long = v.get("text")
+                            break
+                        
+            # Если снова ничего — ставим "0"
+            text_long = text_long or "0"
+
             
             # ===== IMAGES =====
             content = ban.get("content", {}) or {}
