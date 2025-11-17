@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.5.2"
+VersionStatTracker = "0.6"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -162,22 +162,21 @@ class StatTracker:
             },
         )
 
-        # map: group_id -> данные компании
-        group_to_company: Dict[int, Dict[str, Any]] = {}
+        # map: company_id -> данные компании
+        company_map: Dict[int, Dict[str, Any]] = {}
+        
         for camp in campaigns:
-            company_id = camp.get("id")
-            ad_groups = camp.get("ad_groups") or []
-            for g in ad_groups:
-                gid = g.get("id")
-                if gid:
-                    group_to_company[gid] = {
-                        "id_company": company_id,
-                        "name_company": camp.get("name"),
-                        "created_company": camp.get("created"),
-                        "budget_limit_day_company": camp.get("budget_limit_day"),
-                        "status_company": camp.get("status"),
-                        "objective_company": camp.get("objective"),
-                    }
+            cid = camp.get("id")
+            if cid:
+                company_map[cid] = {
+                    "id_company": cid,
+                    "name_company": camp.get("name"),
+                    "created_company": camp.get("created"),
+                    "budget_limit_day_company": camp.get("budget_limit_day"),
+                    "status_company": camp.get("status"),
+                    "objective_company": camp.get("objective"),
+                }
+        
 
         # ===== ГРУППЫ (GROUP) =====
         groups = acc.get_paginated(
@@ -185,7 +184,7 @@ class StatTracker:
             {
                 "limit": 200,
                 "_status__ne": "deleted",
-                "fields": "id,name,created,status,banners,budget_limit_day,targetings",
+                "fields": "id,name,created,status,banners,budget_limit_day,targetings,ad_plan_id",
             },
         )
 
@@ -212,8 +211,10 @@ class StatTracker:
                 "sex": self._join_or_zero(targetings.get("sex")),
             }
         
-            # добавить данные компании
-            group_info_map[gid].update(group_to_company.get(gid, {}))
+            # добавляем данные компании по ad_plan_id
+            company_id = g.get("ad_plan_id")
+            if company_id:
+                group_info_map[gid].update(company_map.get(company_id, {}))
         # ===== БАННЕРЫ =====
         banners = acc.get_paginated(
             "/banners.json",
