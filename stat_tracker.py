@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.9"
+VersionStatTracker = "0.9.1"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -451,9 +451,11 @@ class StatTracker:
         if not os.path.exists(PARQUET_PATH):
             logging.warning("Parquet file does not exist, nothing to upload.")
             return
-            
+
+        now = datetime.utcnow() + timedelta(hours=4)
+        day_folder = now.strftime("%d_%m_%Y")
         timestamp = (datetime.utcnow() + timedelta(hours=4)).strftime("%d_%m_%Y_%H-%M-%S")
-        key = f"stat_tracker_parquet/stat_tracker_{timestamp}.parquet"
+        key = f"stat_tracker_parquet/{day_folder}/stat_tracker_{timestamp}.parquet"
 
         # Заливаем новый
         try:
