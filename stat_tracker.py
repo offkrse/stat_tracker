@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "0.9.1"
+VersionStatTracker = "0.9.2"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -518,8 +518,48 @@ if __name__ == "__main__":
             name="GUZ_4",
         ),
         AccountInfo(
+            token=os.getenv("VK_TOKEN_GUZ_5"),
+            name="GUZ_5",
+        ),
+        AccountInfo(
             token=os.getenv("VK_TOKEN_ALE_1"),
             name="ALE_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_1"),
+            name="NIKOLAY_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_2"),
+            name="NIKOLAY_2",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_3"),
+            name="NIKOLAY_3",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_4"),
+            name="NIKOLAY_4",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_5"),
+            name="NIKOLAY_5",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_6"),
+            name="NIKOLAY_6",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_NIKOLAY_7"),
+            name="NIKOLAY_7",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_OLYA_1"),
+            name="OLYA_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_OLYA_2"),
+            name="OLYA_2",
         ),
     ]
 
