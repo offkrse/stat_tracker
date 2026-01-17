@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.4"
+VersionStatTracker = "1.1.5"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -510,6 +510,7 @@ class StatTracker:
             urls = ban.get("urls", {}) or {}
             primary_url = urls.get("primary", {}) or {}
             banner_url = primary_url.get("url") or "0"
+            banner_url_id = primary_url.get("id") or 0
             banner_url_object_id = primary_url.get("url_object_id") or "0"
             banner_url_object_type = primary_url.get("url_object_type") or "0"
             
@@ -569,6 +570,7 @@ class StatTracker:
                     "image_url": image_url or "0",
                     # urls
                     "banner_url": banner_url or "0",
+                    "banner_url_id": banner_url_id or 0,
                     "banner_url_object_id": banner_url_object_id or "0",
                     "banner_url_object_type": banner_url_object_type or "0",
                     # video stats
