@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.2"
+VersionStatTracker = "1.1.3"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -195,12 +195,17 @@ class StatTracker:
         logging.info(f"[{acc.name}] Fetched stats for {len(stats_map)} banners")
         return stats_map
 
-    def _fetch_faststat(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    def _fetch_faststat(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """
         Запрашивает faststat для баннеров пачками по 200.
-        Возвращает dict: banner_id -> {"clicks_last_30_min": X, "shows_last_30_min": Y}
+        Возвращает dict: banner_id -> {
+            "clicks_minutely": "0,1,0,4,..." (60 значений),
+            "shows_minutely": "36,28,23,..." (60 значений),
+            "clicks_last_30_min": sum,
+            "shows_last_30_min": sum
+        }
         """
-        faststat_map: Dict[int, Dict[str, int]] = {}
+        faststat_map: Dict[int, Dict[str, Any]] = {}
         
         # Разбиваем на пачки по 200
         for i in range(0, len(banner_ids), 200):
@@ -224,6 +229,10 @@ class StatTracker:
                 shows = minutely.get("shows", [])
                 
                 faststat_map[bid] = {
+                    # Поминутные данные как строка через запятую (для нейронки)
+                    "clicks_minutely": ",".join(str(c) for c in clicks) if clicks else "0",
+                    "shows_minutely": ",".join(str(s) for s in shows) if shows else "0",
+                    # Суммы для быстрого анализа
                     "clicks_last_30_min": sum(clicks) if clicks else 0,
                     "shows_last_30_min": sum(shows) if shows else 0,
                 }
@@ -535,7 +544,10 @@ class StatTracker:
                     # uniques
                     "uniques_total": uniques_stats.get("total", 0),
                     "uniques_frequency": float(uniques_stats.get("frequency", 0) or 0),
-                    # faststat (за последние 30 мин)
+                    # faststat - поминутные данные (60 значений через запятую)
+                    "clicks_minutely": fs.get("clicks_minutely", "0"),
+                    "shows_minutely": fs.get("shows_minutely", "0"),
+                    # faststat - суммы за последние 30 мин
                     "clicks_last_30_min": fs.get("clicks_last_30_min", 0),
                     "shows_last_30_min": fs.get("shows_last_30_min", 0),
                     # textblocks
@@ -681,28 +693,34 @@ class AudienceTracker:
     def _get_offset_file(self, acc_name: str) -> str:
         return os.path.join(SEGMENTS_DIR, f"{acc_name}_offset.json")
     
-    def _load_offset(self, acc_name: str) -> int:
+    def _load_offset(self, acc_name: str) -> Dict[str, int]:
+        """Загружает offset и last_total_count"""
         offset_file = self._get_offset_file(acc_name)
         if os.path.exists(offset_file):
             try:
                 with open(offset_file, "r") as f:
                     data = json.load(f)
-                    return data.get("offset", 0)
+                    return {
+                        "offset": data.get("offset", 0),
+                        "last_total_count": data.get("last_total_count", 0)
+                    }
             except:
-                return 0
-        return 0
+                pass
+        return {"offset": 0, "last_total_count": 0}
     
-    def _save_offset(self, acc_name: str, offset: int):
+    def _save_offset(self, acc_name: str, offset: int, total_count: int):
         offset_file = self._get_offset_file(acc_name)
         with open(offset_file, "w") as f:
-            json.dump({"offset": offset}, f)
+            json.dump({"offset": offset, "last_total_count": total_count}, f)
     
     def collect_segments_for_account(self, acc: AccountInfo):
         """
         Собирает segments для аккаунта с пагинацией.
         Один запуск = одна страница (100 записей).
         """
-        offset = self._load_offset(acc.name)
+        offset_data = self._load_offset(acc.name)
+        offset = offset_data["offset"]
+        last_total_count = offset_data["last_total_count"]
         
         data = acc.fetch(
             "/remarketing/segments.json",
@@ -720,9 +738,34 @@ class AudienceTracker:
         items = data.get("items", [])
         total_count = data.get("count", 0)
         
+        # Если offset >= total_count и total не изменился — скип
+        if offset >= total_count and total_count == last_total_count:
+            logging.info(f"[{acc.name}] Segments already synced (offset: {offset}, total: {total_count}), skipping")
+            return
+        
+        # Если offset >= total_count но total изменился — сбрасываем и начинаем сначала
+        if offset >= total_count and total_count != last_total_count:
+            logging.info(f"[{acc.name}] Total count changed ({last_total_count} -> {total_count}), resetting offset")
+            offset = 0
+            self._save_offset(acc.name, 0, total_count)
+            # Делаем новый запрос с offset=0
+            data = acc.fetch(
+                "/remarketing/segments.json",
+                {
+                    "limit": 100,
+                    "offset": 0,
+                    "fields": "id,name,created,relations,pass_condition"
+                }
+            )
+            if not data or "items" not in data:
+                return
+            items = data.get("items", [])
+            total_count = data.get("count", 0)
+        
         if not items:
-            # Достигли конца - сбрасываем offset
-            logging.info(f"[{acc.name}] No more segments, resetting offset")
+            logging.info(f"[{acc.name}] No segments found")
+            self._save_offset(acc.name, 0, total_count)
+            return
             self._save_offset(acc.name, 0)
             return
         
@@ -768,9 +811,7 @@ class AudienceTracker:
         
         # Обновляем offset
         new_offset = offset + len(items)
-        if new_offset >= total_count:
-            new_offset = 0  # Сбрасываем если прошли все
-        self._save_offset(acc.name, new_offset)
+        self._save_offset(acc.name, new_offset, total_count)
         
         logging.info(f"[{acc.name}] Collected {len(items)} segments (offset: {offset} -> {new_offset}, total: {total_count})")
     
