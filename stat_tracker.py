@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.3"
+VersionStatTracker = "1.1.4"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -978,8 +978,36 @@ if __name__ == "__main__":
             name="ZEL_2",
         ),
         AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_3"),
+            name="ZEL_3",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_5"),
+            name="ZEL_5",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_6"),
+            name="ZEL_6",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_7"),
+            name="ZEL_7",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_8"),
+            name="ZEL_8",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ZEL_9"),
+            name="ZEL_9",
+        ),
+        AccountInfo(
             token=os.getenv("VK_TOKEN_ROM_1"),
             name="ROM_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ROM_2"),
+            name="ROM_2",
         ),
         AccountInfo(
             token=os.getenv("VK_TOKEN_GUZ_1"),
@@ -1002,8 +1030,24 @@ if __name__ == "__main__":
             name="GUZ_5",
         ),
         AccountInfo(
+            token=os.getenv("VK_TOKEN_GUZ_6"),
+            name="GUZ_6",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_GUZ_7"),
+            name="GUZ_7",
+        ),
+        AccountInfo(
             token=os.getenv("VK_TOKEN_ALE_1"),
             name="ALE_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ALE_2"),
+            name="ALE_2",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_ALE_3"),
+            name="ALE_3",
         ),
         AccountInfo(
             token=os.getenv("VK_TOKEN_NIKOLAY_1"),
@@ -1040,6 +1084,30 @@ if __name__ == "__main__":
         AccountInfo(
             token=os.getenv("VK_TOKEN_OLYA_2"),
             name="OLYA_2",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MISHUSTIN_1"),
+            name="MISHUSTIN_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MISHUSTIN_2"),
+            name="MISHUSTIN_2",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MISHUSTIN_3"),
+            name="MISHUSTIN_3",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_VESELOV_1"),
+            name="VESELOV_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_VESELOV_2"),
+            name="VESELOV_2",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_VESELOV_3"),
+            name="VESELOV_3",
         ),
     ]
 
