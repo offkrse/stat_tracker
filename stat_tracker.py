@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.1"
+VersionStatTracker = "1.1.2"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -76,6 +76,15 @@ class AccountInfo:
         for attempt in range(1, max_attempts + 1):
             try:
                 r = requests.get(url, headers=self.headers, params=params, timeout=30)
+
+                # Client errors that won't be fixed by retrying
+                if r.status_code == 403:
+                    logging.warning(f"[{self.name}] 403 Forbidden on {url} - skipping")
+                    return None
+                
+                if r.status_code == 404:
+                    logging.warning(f"[{self.name}] 404 Not Found on {url} - skipping")
+                    return None
 
                 # Flood control: VK sends HTTP 429
                 if r.status_code == 429:
