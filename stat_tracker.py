@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.5"
+VersionStatTracker = "1.1.6"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -692,6 +692,83 @@ class AudienceTracker:
     def __init__(self, accounts: List[AccountInfo]):
         self.accounts = accounts
     
+    def _load_users_lists(self, acc_name: str) -> Dict[int, int]:
+        """
+        Загружает users_lists из JSON и возвращает dict: id -> entries_count
+        """
+        json_path = os.path.join(USERS_LISTS_DIR, f"{acc_name}_users_lists.json")
+        if not os.path.exists(json_path):
+            return {}
+        
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            return {item["id"]: item.get("entries_count", 0) for item in items}
+        except:
+            return {}
+    
+    def _load_segments_counts(self, acc_name: str) -> Dict[int, int]:
+        """
+        Загружает people_counts из существующего parquet сегментов.
+        Возвращает dict: segment_id -> people_counts
+        """
+        parquet_path = os.path.join(SEGMENTS_DIR, f"{acc_name}_segments.parquet")
+        if not os.path.exists(parquet_path):
+            return {}
+        
+        try:
+            df = pd.read_parquet(parquet_path)
+            if "people_counts" not in df.columns:
+                return {}
+            return dict(zip(df["id"], df["people_counts"]))
+        except:
+            return {}
+    
+    def _calculate_people_counts(
+        self, 
+        relations_details: List[Dict[str, Any]], 
+        pass_condition: int,
+        users_lists_map: Dict[int, int],
+        segments_counts_map: Dict[int, int]
+    ) -> int:
+        """
+        Рассчитывает people_counts на основе relations.
+        - remarketing_users_list: берем entries_count из users_lists_map по source_id
+        - segment: берем people_counts из segments_counts_map по object_id
+        - positive: складываем
+        - negative: вычитаем
+        - итог делим на pass_condition
+        """
+        total = 0
+        
+        for rd in relations_details:
+            object_type = rd.get("object_type")
+            object_id = rd.get("object_id")
+            source_id = rd.get("source_id")
+            rel_type = rd.get("type", "positive")
+            
+            count = 0
+            
+            if object_type == "remarketing_users_list":
+                # Берем entries_count по source_id из users_lists
+                if source_id:
+                    count = users_lists_map.get(source_id, 0)
+            elif object_type == "segment":
+                # Берем people_counts другого сегмента по object_id
+                if object_id:
+                    count = segments_counts_map.get(object_id, 0)
+            
+            if rel_type == "positive":
+                total += count
+            elif rel_type == "negative":
+                total -= count
+        
+        # Делим на pass_condition (если > 0)
+        if pass_condition and pass_condition > 0:
+            total = total // pass_condition
+        
+        return max(0, total)  # Не может быть отрицательным
+    
     def _get_offset_file(self, acc_name: str) -> str:
         return os.path.join(SEGMENTS_DIR, f"{acc_name}_offset.json")
     
@@ -768,14 +845,17 @@ class AudienceTracker:
             logging.info(f"[{acc.name}] No segments found")
             self._save_offset(acc.name, 0, total_count)
             return
-            self._save_offset(acc.name, 0)
-            return
+        
+        # Загружаем данные для расчета people_counts
+        users_lists_map = self._load_users_lists(acc.name)
+        segments_counts_map = self._load_segments_counts(acc.name)
         
         # Собираем записи для parquet
         records = []
         for seg in items:
             seg_id = seg.get("id")
             relations = seg.get("relations", []) or []
+            pass_condition = seg.get("pass_condition") or 1
             
             # Собираем object_type из relations
             object_types = []
@@ -784,17 +864,28 @@ class AudienceTracker:
                 if ot:
                     object_types.append(ot)
             
-            # Запрашиваем детальные relations для получения source_id и type
+            # Запрашиваем детальные relations для получения source_id, object_id и type
             relations_details = self._fetch_segment_relations(acc, seg_id)
             
-            # Собираем source_id и type из relations
+            # Собираем данные из relations
+            object_ids = []
             source_ids = []
             relation_types = []
             for rd in relations_details:
+                if rd.get("object_id"):
+                    object_ids.append(str(rd["object_id"]))
                 if rd.get("source_id"):
                     source_ids.append(str(rd["source_id"]))
                 if rd.get("type"):
                     relation_types.append(rd["type"])
+            
+            # Рассчитываем people_counts
+            people_counts = self._calculate_people_counts(
+                relations_details, 
+                pass_condition,
+                users_lists_map,
+                segments_counts_map
+            )
             
             records.append({
                 "account_name": acc.name,
@@ -802,9 +893,11 @@ class AudienceTracker:
                 "name": seg.get("name"),
                 "created": seg.get("created"),
                 "relations_object_type": ",".join(object_types) if object_types else "0",
-                "pass_condition": seg.get("pass_condition"),
+                "pass_condition": pass_condition,
+                "relations_object_id": ",".join(object_ids) if object_ids else "0",
                 "relations_source_id": ",".join(source_ids) if source_ids else "0",
                 "relations_type": ",".join(relation_types) if relation_types else "0",
+                "people_counts": people_counts,
             })
         
         # Дозаписываем в parquet
@@ -820,7 +913,7 @@ class AudienceTracker:
     def _fetch_segment_relations(self, acc: AccountInfo, segment_id: int) -> List[Dict[str, Any]]:
         """
         Запрашивает relations для конкретного сегмента.
-        Возвращает список с source_id и type из params.
+        Возвращает список с object_id, object_type, source_id и type из params.
         """
         data = acc.fetch(
             f"/remarketing/segments/{segment_id}/relations.json",
@@ -837,6 +930,8 @@ class AudienceTracker:
         for rel in items:
             params = rel.get("params", {}) or {}
             relations_data.append({
+                "object_id": rel.get("object_id"),
+                "object_type": rel.get("object_type"),
                 "source_id": params.get("source_id"),
                 "type": params.get("type"),
             })
@@ -916,11 +1011,11 @@ class AudienceTracker:
             try:
                 logging.info(f"[{acc.name}] Starting audience collection...")
                 
+                # Users lists (все сразу) - СНАЧАЛА, т.к. нужны для расчета people_counts
+                self.collect_users_lists_for_account(acc)
+                
                 # Сегменты (одна страница за запуск)
                 self.collect_segments_for_account(acc)
-                
-                # Users lists (все сразу)
-                self.collect_users_lists_for_account(acc)
                 
             except Exception as e:
                 logging.error(f"[{acc.name}] Error collecting audiences: {e}")
