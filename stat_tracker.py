@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.0"
+VersionStatTracker = "1.1.1"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -154,6 +154,37 @@ class StatTracker:
         if not values:
             return "0"
         return ",".join(str(v) for v in values)
+
+    def _fetch_banner_stats(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """
+        Запрашивает статистику для баннеров пачками по 200.
+        Возвращает dict: banner_id -> {base: {...}, uniques: {...}, video: {...}}
+        """
+        stats_map: Dict[int, Dict[str, Any]] = {}
+        
+        # Разбиваем на пачки по 200
+        for i in range(0, len(banner_ids), 200):
+            batch = banner_ids[i:i+200]
+            ids_str = ",".join(str(bid) for bid in batch)
+            
+            data = acc.fetch(
+                "/statistics/banners/summary.json",
+                {
+                    "id": ids_str,
+                    "metrics": "base,uniques,video"
+                }
+            )
+            
+            if not data or "items" not in data:
+                continue
+            
+            for item in data.get("items", []):
+                bid = item.get("id")
+                if bid is not None:
+                    stats_map[bid] = item.get("total", {})
+        
+        logging.info(f"[{acc.name}] Fetched stats for {len(stats_map)} banners")
+        return stats_map
 
     def _fetch_faststat(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, int]]:
         """
@@ -303,20 +334,11 @@ class StatTracker:
             },
         )
 
-        # ===== СТАТИСТИКА ПО БАННЕРАМ =====
-        stats = acc.fetch(
-            "/statistics/banners/summary.json",
-            {"metrics": "base,uniques,video"},
-        ) or {}
-
-        stats_map: Dict[int, Dict[str, Any]] = {}
-        for item in stats.get("items", []):
-            bid = item.get("id")
-            if bid is not None:
-                stats_map[bid] = item.get("total", {})
+        # ===== СТАТИСТИКА ПО БАННЕРАМ (с пагинацией по id) =====
+        banner_ids = [ban.get("id") for ban in banners if ban.get("id") is not None]
+        stats_map = self._fetch_banner_stats(acc, banner_ids)
 
         # ===== FASTSTAT (поминутная статистика за 30 мин) =====
-        banner_ids = [ban.get("id") for ban in banners if ban.get("id") is not None]
         faststat_map = self._fetch_faststat(acc, banner_ids)
 
         # ===== СБОР ЗАПИСЕЙ =====
