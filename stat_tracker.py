@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.6"
+VersionStatTracker = "1.1.7"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -307,7 +307,7 @@ class StatTracker:
             fulltime_schedule = {}
             for day in days:
                 hours = fulltime.get(day, [])
-                fulltime_schedule[f"fulltime_{day}"] = self._join_or_zero(hours) if hours else "0"
+                fulltime_schedule[day] = self._join_or_zero(hours) if hours else "0"
         
             group_info_map[gid] = {
                 "id_group": gid,
@@ -315,26 +315,26 @@ class StatTracker:
                 "created_group": g.get("created"),
                 "updated_group": g.get("updated"),
                 "status_group": g.get("status"),
-                "package_id_group": g.get("package_id"),
                 "budget_limit_day_group": g.get("budget_limit_day"),
                 "budget_limit_group": g.get("budget_limit"),
-                "max_price_group": g.get("max_price"),
                 "date_start_group": g.get("date_start"),
                 "date_end_group": g.get("date_end"),
+                "max_price_group": g.get("max_price"),
                 "price_group": g.get("price"),
-                "utm_group": g.get("utm") or "0",
                 "objective_group": g.get("objective") or "0",
                 "priced_goal_name_group": priced_goal_group.get("name") or "0",
                 "priced_goal_source_id_group": priced_goal_group.get("source_id") or 0,
+                "package_id": g.get("package_id"),
                 "age": self._parse_age(targetings),
-                "geo": self._join_or_zero(targetings.get("geo", {}).get("regions")),
-                "pads": self._join_or_zero(targetings.get("pads")),
-                "group_members": targetings.get("group_members") or "0",
-                "interests": self._join_or_zero(targetings.get("interests")),
-                "id_segments": self._join_or_zero(targetings.get("segments")),
-                "sex": self._join_or_zero(targetings.get("sex")),
                 "fulltime_flags": fulltime_flags,
                 **fulltime_schedule,
+                "geo_regions": self._join_or_zero(targetings.get("geo", {}).get("regions")),
+                "interests": self._join_or_zero(targetings.get("interests")),
+                "interests_soc_dem": self._join_or_zero(targetings.get("interests_soc_dem")),
+                "pads": self._join_or_zero(targetings.get("pads")),
+                "segments": self._join_or_zero(targetings.get("segments")),
+                "sex": self._join_or_zero(targetings.get("sex")),
+                "utm": g.get("utm") or "0",
             }
         
             # добавляем данные компании по ad_plan_id
@@ -380,6 +380,9 @@ class StatTracker:
             
             # === TITLE (title_40_vkads) ===
             title = tb.get("title_40_vkads", {}).get("text") or "0"
+            
+            # === TEXT ADDITIONAL (title_30_additional) ===
+            text_additional = tb.get("title_30_additional", {}).get("text") or "0"
             
             # === ABOUT COMPANY ===
             about_company = tb.get("about_company_115", {}).get("text") or "0"
@@ -553,6 +556,7 @@ class StatTracker:
                     "shows_last_30_min": fs.get("shows_last_30_min", 0),
                     # textblocks
                     "title": title or "0",
+                    "text_additional": text_additional or "0",
                     "text_short": text_short or "0",
                     "text_long": text_long or "0",
                     "about_company": about_company or "0",
