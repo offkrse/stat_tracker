@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.7"
+VersionStatTracker = "1.1.8"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -249,7 +249,7 @@ class StatTracker:
             {
                 "limit": 200,
                 "_status__ne": "deleted",
-                "fields": "id,name,created,status,ad_groups,budget_limit_day,objective,updated,budget_limit,date_start,date_end,max_price,priced_goal",
+                "fields": "id,name,created,status,budget_limit_day,objective,updated,budget_limit,date_start,date_end,max_price,priced_goal",
             },
         )
 
@@ -283,7 +283,7 @@ class StatTracker:
             {
                 "limit": 200,
                 "_status__ne": "deleted",
-                "fields": "name,created,updated,package_id,ad_plan_id,budget_limit_day,budget_limit,max_price,date_start,date_end,price,priced_goal,targetings,utm,objective",
+                "fields": "id,name,status,created,updated,package_id,ad_plan_id,budget_limit_day,budget_limit,max_price,date_start,date_end,price,priced_goal,targetings,utm,objective",
             },
         )
 
@@ -339,8 +339,8 @@ class StatTracker:
         
             # добавляем данные компании по ad_plan_id
             company_id = g.get("ad_plan_id")
-            if company_id:
-                group_info_map[gid].update(company_map.get(company_id, {}))
+            if company_id and company_id in company_map:
+                group_info_map[gid].update(company_map[company_id])
 
         # ===== БАННЕРЫ =====
         banners = acc.get_paginated(
