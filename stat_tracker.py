@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.8"
+VersionStatTracker = "1.1.9"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -1067,8 +1067,16 @@ def load_accounts_from_env() -> List[AccountInfo]:
 if __name__ == "__main__":
     ACCOUNTS = [
         AccountInfo(
-            token=os.getenv("VK_TOKEN_MAIN"),
-            name="MAIN",
+            token=os.getenv("VK_TOKEN_MAIN_1"),
+            name="MAIN_1",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MAIN_4"),
+            name="MAIN_4",
+        ),
+        AccountInfo(
+            token=os.getenv("VK_TOKEN_MAIN_5"),
+            name="MAIN_5",
         ),
         AccountInfo(
             token=os.getenv("VK_TOKEN_ZEL_1"),
