@@ -3,7 +3,9 @@ import time
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, Future
+import gc
 
 import requests
 from dotenv import load_dotenv
@@ -12,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.1.9"
+VersionStatTracker = "1.2.1"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -195,6 +197,73 @@ class StatTracker:
         logging.info(f"[{acc.name}] Fetched stats for {len(stats_map)} banners")
         return stats_map
 
+    def _fetch_banner_stats_day(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """
+        Запрашивает статистику за СЕГОДНЯ для баннеров пачками по 200.
+        Endpoint: /statistics/banners/day.json
+        Возвращает dict: banner_id -> {base: {...}, uniques: {...}, video: {...}}
+        """
+        stats_map: Dict[int, Dict[str, Any]] = {}
+        
+        for i in range(0, len(banner_ids), 200):
+            batch = banner_ids[i:i+200]
+            ids_str = ",".join(str(bid) for bid in batch)
+            
+            data = acc.fetch(
+                "/statistics/banners/day.json",
+                {
+                    "id": ids_str,
+                    "metrics": "base,uniques,video"
+                }
+            )
+            
+            if not data or "items" not in data:
+                continue
+            
+            for item in data.get("items", []):
+                bid = item.get("id")
+                if bid is not None:
+                    stats_map[bid] = item.get("total", {})
+        
+        logging.info(f"[{acc.name}] Fetched DAY stats for {len(stats_map)} banners")
+        return stats_map
+
+    def _fetch_banner_stats_week(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """
+        Запрашивает статистику за НЕДЕЛЮ (7 дней назад) для баннеров пачками по 200.
+        Endpoint: /statistics/banners/day.json с параметром date_from
+        Возвращает dict: banner_id -> {base: {...}, uniques: {...}, video: {...}}
+        """
+        stats_map: Dict[int, Dict[str, Any]] = {}
+        
+        # Дата 7 дней назад
+        now = datetime.utcnow() + timedelta(hours=4)
+        date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        
+        for i in range(0, len(banner_ids), 200):
+            batch = banner_ids[i:i+200]
+            ids_str = ",".join(str(bid) for bid in batch)
+            
+            data = acc.fetch(
+                "/statistics/banners/day.json",
+                {
+                    "id": ids_str,
+                    "metrics": "base,uniques,video",
+                    "date_from": date_from
+                }
+            )
+            
+            if not data or "items" not in data:
+                continue
+            
+            for item in data.get("items", []):
+                bid = item.get("id")
+                if bid is not None:
+                    stats_map[bid] = item.get("total", {})
+        
+        logging.info(f"[{acc.name}] Fetched WEEK stats for {len(stats_map)} banners (from {date_from})")
+        return stats_map
+
     def _fetch_faststat(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """
         Запрашивает faststat для баннеров пачками по 200.
@@ -239,7 +308,7 @@ class StatTracker:
         
         return faststat_map
 
-    def collect_data_for_account(self, acc: AccountInfo) -> List[Dict[str, Any]]:
+    def collect_data_for_account(self, acc: AccountInfo) -> Tuple[List[Dict[str, Any]], List[int]]:
         snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
         records: List[Dict[str, Any]] = []
 
@@ -276,6 +345,8 @@ class StatTracker:
                     "priced_goal_source_id_company": priced_goal.get("source_id") or 0,
                 }
         
+        # Очищаем campaigns - больше не нужны
+        del campaigns
 
         # ===== ГРУППЫ (GROUP) =====
         groups = acc.get_paginated(
@@ -341,6 +412,10 @@ class StatTracker:
             company_id = g.get("ad_plan_id")
             if company_id and company_id in company_map:
                 group_info_map[gid].update(company_map[company_id])
+        
+        # Очищаем groups и company_map - больше не нужны
+        del groups
+        del company_map
 
         # ===== БАННЕРЫ =====
         banners = acc.get_paginated(
@@ -586,61 +661,475 @@ class StatTracker:
             )
 
             records.append(base_record)
+        
+        # Очищаем промежуточные данные
+        del banners
+        del stats_map
+        del faststat_map
+        del group_info_map
 
         logging.info(f"[{acc.name}] Collected {len(records)} records")
+        return records, banner_ids
+
+    def _merge_day_stats_to_records(
+        self, 
+        records: List[Dict[str, Any]], 
+        day_stats_map: Dict[int, Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Добавляет статистику за сегодня (day.json) в записи.
+        Поля добавляются с суффиксом _today.
+        """
+        for record in records:
+            ban_id = record.get("id_banner")
+            if ban_id is None:
+                continue
+            
+            s = day_stats_map.get(ban_id, {})
+            base = s.get("base", {}) or {}
+            video_stats = s.get("video", {}) or {}
+            vk_stats = base.get("vk", {}) or {}
+            uniques_stats = s.get("uniques", {}) or {}
+            
+            record.update({
+                "shows_today": base.get("shows", 0),
+                "clicks_today": base.get("clicks", 0),
+                "spent_today": float(base.get("spent", 0) or 0),
+                "cpm_today": float(base.get("cpm", 0) or 0),
+                "cpc_today": float(base.get("cpc", 0) or 0),
+                "ctr_today": float(base.get("ctr", 0) or 0),
+                "goals_today": vk_stats.get("goals", 0),
+                "cpa_today": float(vk_stats.get("cpa", 0) or 0),
+                "cr_today": float(vk_stats.get("cr", 0) or 0),
+                "uniques_total_today": uniques_stats.get("total", 0),
+                "uniques_frequency_today": float(uniques_stats.get("frequency", 0) or 0),
+                "viewed_25_percent_rate_today": float(video_stats.get("viewed_25_percent_rate", 0) or 0),
+                "viewed_50_percent_rate_today": float(video_stats.get("viewed_50_percent_rate", 0) or 0),
+                "viewed_75_percent_rate_today": float(video_stats.get("viewed_75_percent_rate", 0) or 0),
+                "viewed_100_percent_rate_today": float(video_stats.get("viewed_100_percent_rate", 0) or 0),
+            })
+        
         return records
 
     def collect_and_save_per_account(self):
         """
         Собирает данные и сохраняет parquet по каждому аккаунту отдельно.
-        Это экономит RAM.
+        Использует конвейерную обработку:
+        - Пока обрабатывается summary.json для аккаунта N+1
+        - Параллельно запрашивается day.json для аккаунта N
+        
+        Сохраняет:
+        - stat_<acc_name>.parquet - основная статистика с day stats
+        - stat_day_<acc_name>.parquet - только day stats
+        
+        В промежутке 21:00-21:30 дополнительно собирает недельную статистику.
         """
         now = datetime.utcnow() + timedelta(hours=4)
         day_folder = now.strftime("%d_%m_%Y")
         timestamp = now.strftime("%d_%m_%Y_%H-%M-%S")
         
+        # Проверяем, нужно ли собирать недельную статистику (21:00-21:30)
+        current_hour = now.hour
+        current_minute = now.minute
+        collect_weekly = (current_hour == 21 and current_minute < 30)
+        
+        if collect_weekly:
+            logging.info("Time is between 21:00-21:30, will collect weekly stats after main processing")
+        
+        # Хранилище banner_ids для каждого аккаунта (для недельной статистики)
+        account_banner_ids: Dict[str, List[int]] = {}
+        
+        # Используем ThreadPoolExecutor для параллельных запросов day.json
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Хранилище для данных предыдущего аккаунта
+            prev_acc: Optional[AccountInfo] = None
+            prev_records: Optional[List[Dict[str, Any]]] = None
+            prev_banner_ids: Optional[List[int]] = None
+            day_stats_future: Optional[Future] = None
+            
+            for i, acc in enumerate(self.accounts):
+                try:
+                    # ===== ОБРАБОТКА ПРЕДЫДУЩЕГО АККАУНТА (если есть) =====
+                    if prev_acc is not None and prev_records is not None:
+                        # Ждём day.json от предыдущего аккаунта
+                        day_stats_map: Dict[int, Dict[str, Any]] = {}
+                        if day_stats_future is not None:
+                            try:
+                                day_stats_map = day_stats_future.result(timeout=300)
+                            except Exception as e:
+                                logging.error(f"[{prev_acc.name}] Failed to get day stats: {e}")
+                        
+                        # Сохраняем day stats отдельно
+                        if day_stats_map:
+                            self._save_day_stats(prev_acc, prev_banner_ids, day_stats_map, day_folder, timestamp)
+                        
+                        # Мержим day stats в записи предыдущего аккаунта
+                        prev_records = self._merge_day_stats_to_records(prev_records, day_stats_map)
+                        
+                        # Сохраняем предыдущий аккаунт (основная статистика)
+                        self._save_account_data(prev_acc, prev_records, day_folder, timestamp)
+                        
+                        # Сохраняем banner_ids для недельной статистики
+                        if collect_weekly and prev_banner_ids:
+                            account_banner_ids[prev_acc.name] = prev_banner_ids
+                        
+                        # Очищаем память
+                        del prev_records
+                        del day_stats_map
+                        gc.collect()
+                    
+                    # ===== СБОР ДАННЫХ ТЕКУЩЕГО АККАУНТА =====
+                    logging.info(f"[{acc.name}] Starting data collection...")
+                    records, banner_ids = self.collect_data_for_account(acc)
+                    
+                    if not records:
+                        logging.warning(f"[{acc.name}] No records collected, skipping.")
+                        prev_acc = None
+                        prev_records = None
+                        prev_banner_ids = None
+                        day_stats_future = None
+                        continue
+                    
+                    # ===== ЗАПУСКАЕМ ПАРАЛЛЕЛЬНЫЙ ЗАПРОС day.json ДЛЯ ТЕКУЩЕГО АККАУНТА =====
+                    # Пока следующий аккаунт будет собирать summary, мы получим day stats
+                    day_stats_future = executor.submit(
+                        self._fetch_banner_stats_day, acc, banner_ids
+                    )
+                    
+                    # Сохраняем для обработки на следующей итерации
+                    prev_acc = acc
+                    prev_records = records
+                    prev_banner_ids = banner_ids
+                    
+                except Exception as e:
+                    logging.error(f"Error processing account {acc.name}: {e}")
+                    prev_acc = None
+                    prev_records = None
+                    prev_banner_ids = None
+                    day_stats_future = None
+            
+            # ===== ОБРАБОТКА ПОСЛЕДНЕГО АККАУНТА =====
+            if prev_acc is not None and prev_records is not None:
+                day_stats_map: Dict[int, Dict[str, Any]] = {}
+                if day_stats_future is not None:
+                    try:
+                        day_stats_map = day_stats_future.result(timeout=300)
+                    except Exception as e:
+                        logging.error(f"[{prev_acc.name}] Failed to get day stats: {e}")
+                
+                # Сохраняем day stats отдельно
+                if day_stats_map:
+                    self._save_day_stats(prev_acc, prev_banner_ids, day_stats_map, day_folder, timestamp)
+                
+                prev_records = self._merge_day_stats_to_records(prev_records, day_stats_map)
+                self._save_account_data(prev_acc, prev_records, day_folder, timestamp)
+                
+                # Сохраняем banner_ids для недельной статистики
+                if collect_weekly and prev_banner_ids:
+                    account_banner_ids[prev_acc.name] = prev_banner_ids
+                
+                del prev_records
+                del day_stats_map
+                gc.collect()
+        
+        # ===== СБОР НЕДЕЛЬНОЙ СТАТИСТИКИ (только 21:00-21:30) =====
+        if collect_weekly:
+            self._collect_weekly_stats(account_banner_ids, day_folder, timestamp)
+    
+    def _save_day_stats(
+        self,
+        acc: AccountInfo,
+        banner_ids: List[int],
+        day_stats_map: Dict[int, Dict[str, Any]],
+        day_folder: str,
+        timestamp: str
+    ):
+        """
+        Сохраняет day stats в отдельный parquet файл.
+        """
+        if not day_stats_map:
+            return
+        
+        snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
+        
+        records = []
+        for ban_id in banner_ids:
+            if ban_id not in day_stats_map:
+                continue
+            
+            s = day_stats_map[ban_id]
+            base = s.get("base", {}) or {}
+            video_stats = s.get("video", {}) or {}
+            vk_stats = base.get("vk", {}) or {}
+            uniques_stats = s.get("uniques", {}) or {}
+            
+            records.append({
+                "snapshot_at": snapshot_at,
+                "account_name": acc.name,
+                "id_banner": ban_id,
+                "shows": base.get("shows", 0),
+                "clicks": base.get("clicks", 0),
+                "spent": float(base.get("spent", 0) or 0),
+                "cpm": float(base.get("cpm", 0) or 0),
+                "cpc": float(base.get("cpc", 0) or 0),
+                "ctr": float(base.get("ctr", 0) or 0),
+                "goals": vk_stats.get("goals", 0),
+                "cpa": float(vk_stats.get("cpa", 0) or 0),
+                "cr": float(vk_stats.get("cr", 0) or 0),
+                "uniques_total": uniques_stats.get("total", 0),
+                "uniques_frequency": float(uniques_stats.get("frequency", 0) or 0),
+                "viewed_25_percent_rate": float(video_stats.get("viewed_25_percent_rate", 0) or 0),
+                "viewed_50_percent_rate": float(video_stats.get("viewed_50_percent_rate", 0) or 0),
+                "viewed_75_percent_rate": float(video_stats.get("viewed_75_percent_rate", 0) or 0),
+                "viewed_100_percent_rate": float(video_stats.get("viewed_100_percent_rate", 0) or 0),
+            })
+        
+        if not records:
+            return
+        
+        df = pd.DataFrame(records)
+        
+        # Оптимизация типов
+        df["account_name"] = df["account_name"].astype("category")
+        for col in ["id_banner", "shows", "clicks", "goals", "uniques_total"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="integer", errors="ignore")
+        for col in ["spent", "cpm", "cpc", "ctr", "cpa", "cr", "uniques_frequency",
+                    "viewed_25_percent_rate", "viewed_50_percent_rate",
+                    "viewed_75_percent_rate", "viewed_100_percent_rate"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="float", errors="ignore")
+        
+        # Локальный файл
+        local_path = os.path.join(DATA_DIR, f"stat_day_{acc.name}.parquet")
+        table = pa.Table.from_pandas(df)
+        
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        
+        pq.write_table(table, local_path)
+        logging.info(f"[{acc.name}] Saved day stats parquet: {local_path} ({len(df)} records)")
+        
+        # Заливаем в S3
+        s3_key = f"stat_tracker_parquet/{day_folder}/{acc.name}/stat_day_{acc.name}_{timestamp}.parquet"
+        try:
+            s3_client.upload_file(local_path, S3_BUCKET, s3_key)
+            logging.info(f"[{acc.name}] Uploaded day stats to S3: s3://{S3_BUCKET}/{s3_key}")
+        except Exception as e:
+            logging.error(f"[{acc.name}] Failed to upload day stats to S3: {e}")
+        
+        del df
+        del table
+    
+    def _collect_weekly_stats(
+        self,
+        account_banner_ids: Dict[str, List[int]],
+        day_folder: str,
+        timestamp: str
+    ):
+        """
+        Собирает недельную статистику для всех аккаунтов.
+        Запускается только в промежутке 21:00-21:30.
+        """
+        logging.info("Starting weekly stats collection...")
+        
         for acc in self.accounts:
             try:
-                records = self.collect_data_for_account(acc)
-                
-                if not records:
-                    logging.warning(f"[{acc.name}] No records collected, skipping.")
+                banner_ids = account_banner_ids.get(acc.name)
+                if not banner_ids:
+                    logging.warning(f"[{acc.name}] No banner_ids for weekly stats, skipping")
                     continue
                 
-                df = pd.DataFrame(records)
+                # Запрашиваем недельную статистику
+                week_stats_map = self._fetch_banner_stats_week(acc, banner_ids)
                 
-                # Локальный файл
-                local_path = os.path.join(DATA_DIR, f"stat_{acc.name}.parquet")
-                table = pa.Table.from_pandas(df)
+                if not week_stats_map:
+                    logging.warning(f"[{acc.name}] No weekly stats received")
+                    continue
                 
-                # Удаляем старый если есть
-                if os.path.exists(local_path):
-                    os.remove(local_path)
+                # Сохраняем
+                self._save_week_stats(acc, banner_ids, week_stats_map, day_folder, timestamp)
                 
-                pq.write_table(table, local_path)
-                logging.info(f"[{acc.name}] Saved parquet: {local_path}")
-                
-                # Заливаем в S3
-                s3_key = f"stat_tracker_parquet/{day_folder}/{acc.name}/stat_{acc.name}_{timestamp}.parquet"
-                try:
-                    s3_client.upload_file(local_path, S3_BUCKET, s3_key)
-                    logging.info(f"[{acc.name}] Uploaded to S3: s3://{S3_BUCKET}/{s3_key}")
-                except Exception as e:
-                    logging.error(f"[{acc.name}] Failed to upload to S3: {e}")
-                
-                # Очищаем память
-                del df
-                del records
+                # Очищаем
+                del week_stats_map
+                gc.collect()
                 
             except Exception as e:
-                logging.error(f"Error processing account {acc.name}: {e}")
+                logging.error(f"[{acc.name}] Error collecting weekly stats: {e}")
+        
+        logging.info("Weekly stats collection completed")
+    
+    def _save_week_stats(
+        self,
+        acc: AccountInfo,
+        banner_ids: List[int],
+        week_stats_map: Dict[int, Dict[str, Any]],
+        day_folder: str,
+        timestamp: str
+    ):
+        """
+        Сохраняет недельную статистику в parquet файл.
+        """
+        if not week_stats_map:
+            return
+        
+        snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
+        date_from = (datetime.utcnow() + timedelta(hours=4) - timedelta(days=7)).strftime("%Y-%m-%d")
+        
+        records = []
+        for ban_id in banner_ids:
+            if ban_id not in week_stats_map:
+                continue
+            
+            s = week_stats_map[ban_id]
+            base = s.get("base", {}) or {}
+            video_stats = s.get("video", {}) or {}
+            vk_stats = base.get("vk", {}) or {}
+            uniques_stats = s.get("uniques", {}) or {}
+            
+            records.append({
+                "snapshot_at": snapshot_at,
+                "date_from": date_from,
+                "account_name": acc.name,
+                "id_banner": ban_id,
+                "shows": base.get("shows", 0),
+                "clicks": base.get("clicks", 0),
+                "spent": float(base.get("spent", 0) or 0),
+                "cpm": float(base.get("cpm", 0) or 0),
+                "cpc": float(base.get("cpc", 0) or 0),
+                "ctr": float(base.get("ctr", 0) or 0),
+                "goals": vk_stats.get("goals", 0),
+                "cpa": float(vk_stats.get("cpa", 0) or 0),
+                "cr": float(vk_stats.get("cr", 0) or 0),
+                "uniques_total": uniques_stats.get("total", 0),
+                "uniques_frequency": float(uniques_stats.get("frequency", 0) or 0),
+                "viewed_25_percent_rate": float(video_stats.get("viewed_25_percent_rate", 0) or 0),
+                "viewed_50_percent_rate": float(video_stats.get("viewed_50_percent_rate", 0) or 0),
+                "viewed_75_percent_rate": float(video_stats.get("viewed_75_percent_rate", 0) or 0),
+                "viewed_100_percent_rate": float(video_stats.get("viewed_100_percent_rate", 0) or 0),
+            })
+        
+        if not records:
+            return
+        
+        df = pd.DataFrame(records)
+        
+        # Оптимизация типов
+        df["account_name"] = df["account_name"].astype("category")
+        for col in ["id_banner", "shows", "clicks", "goals", "uniques_total"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="integer", errors="ignore")
+        for col in ["spent", "cpm", "cpc", "ctr", "cpa", "cr", "uniques_frequency",
+                    "viewed_25_percent_rate", "viewed_50_percent_rate",
+                    "viewed_75_percent_rate", "viewed_100_percent_rate"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="float", errors="ignore")
+        
+        # Локальный файл
+        local_path = os.path.join(DATA_DIR, f"stat_week_{acc.name}.parquet")
+        table = pa.Table.from_pandas(df)
+        
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        
+        pq.write_table(table, local_path)
+        logging.info(f"[{acc.name}] Saved week stats parquet: {local_path} ({len(df)} records)")
+        
+        # Заливаем в S3
+        s3_key = f"stat_tracker_parquet/{day_folder}/{acc.name}/stat_week_{acc.name}_{timestamp}.parquet"
+        try:
+            s3_client.upload_file(local_path, S3_BUCKET, s3_key)
+            logging.info(f"[{acc.name}] Uploaded week stats to S3: s3://{S3_BUCKET}/{s3_key}")
+        except Exception as e:
+            logging.error(f"[{acc.name}] Failed to upload week stats to S3: {e}")
+        
+        del df
+        del table
+    
+    def _save_account_data(
+        self, 
+        acc: AccountInfo, 
+        records: List[Dict[str, Any]], 
+        day_folder: str, 
+        timestamp: str
+    ):
+        """
+        Сохраняет данные аккаунта в parquet локально и в S3.
+        Оптимизация памяти: использует категориальные типы для строковых полей.
+        """
+        if not records:
+            return
+        
+        df = pd.DataFrame(records)
+        
+        # ===== ОПТИМИЗАЦИЯ ПАМЯТИ: категории для повторяющихся строк =====
+        categorical_columns = [
+            "account_name", "status_banner", "status_group", "status_company",
+            "objective_company", "objective_group", "priced_goal_name_company",
+            "priced_goal_name_group", "sex", "fulltime_flags",
+            "banner_url_object_type", "cta"
+        ]
+        for col in categorical_columns:
+            if col in df.columns:
+                df[col] = df[col].astype("category")
+        
+        # ===== ОПТИМИЗАЦИЯ: downcast числовых типов =====
+        int_columns = [
+            "id_banner", "id_group", "id_company", "shows", "clicks", "goals",
+            "uniques_total", "clicks_last_30_min", "shows_last_30_min",
+            "icon_id", "banner_url_id", "package_id", "priced_goal_source_id_company",
+            "priced_goal_source_id_group", "shows_today", "clicks_today", 
+            "goals_today", "uniques_total_today"
+        ]
+        for col in int_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="integer", errors="ignore")
+        
+        float_columns = [
+            "spent", "cpm", "cpc", "ctr", "cpa", "cr", "uniques_frequency",
+            "viewed_25_percent_rate", "viewed_50_percent_rate", 
+            "viewed_75_percent_rate", "viewed_100_percent_rate",
+            "budget_limit_day_company", "budget_limit_company",
+            "budget_limit_day_group", "budget_limit_group",
+            "max_price_company", "max_price_group", "price_group",
+            "spent_today", "cpm_today", "cpc_today", "ctr_today", 
+            "cpa_today", "cr_today", "uniques_frequency_today",
+            "viewed_25_percent_rate_today", "viewed_50_percent_rate_today",
+            "viewed_75_percent_rate_today", "viewed_100_percent_rate_today"
+        ]
+        for col in float_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], downcast="float", errors="ignore")
+        
+        # Локальный файл
+        local_path = os.path.join(DATA_DIR, f"stat_{acc.name}.parquet")
+        table = pa.Table.from_pandas(df)
+        
+        # Удаляем старый если есть
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        
+        pq.write_table(table, local_path)
+        logging.info(f"[{acc.name}] Saved parquet: {local_path} ({len(df)} records)")
+        
+        # Заливаем в S3
+        s3_key = f"stat_tracker_parquet/{day_folder}/{acc.name}/stat_{acc.name}_{timestamp}.parquet"
+        try:
+            s3_client.upload_file(local_path, S3_BUCKET, s3_key)
+            logging.info(f"[{acc.name}] Uploaded to S3: s3://{S3_BUCKET}/{s3_key}")
+        except Exception as e:
+            logging.error(f"[{acc.name}] Failed to upload to S3: {e}")
+        
+        # Очищаем DataFrame
+        del df
+        del table
 
     def collect_data(self) -> pd.DataFrame:
         """Старый метод для совместимости - собирает все в один DataFrame"""
         all_records: List[Dict[str, Any]] = []
         for acc in self.accounts:
             try:
-                recs = self.collect_data_for_account(acc)
+                recs, _ = self.collect_data_for_account(acc)
                 all_records.extend(recs)
             except Exception as e:
                 logging.error(f"Error processing account {acc.name}: {e}")
