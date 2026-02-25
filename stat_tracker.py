@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.2.1"
+VersionStatTracker = "1.2.2"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -205,6 +205,9 @@ class StatTracker:
         """
         stats_map: Dict[int, Dict[str, Any]] = {}
         
+        # Сегодняшняя дата по UTC+3
+        today = (datetime.utcnow() + timedelta(hours=3)).strftime("%Y-%m-%d")
+        
         for i in range(0, len(banner_ids), 200):
             batch = banner_ids[i:i+200]
             ids_str = ",".join(str(bid) for bid in batch)
@@ -213,7 +216,9 @@ class StatTracker:
                 "/statistics/banners/day.json",
                 {
                     "id": ids_str,
-                    "metrics": "base,uniques,video"
+                    "metrics": "base,uniques,video",
+                    "date_from": today,
+                    "attribution": "conversion"
                 }
             )
             
@@ -225,7 +230,7 @@ class StatTracker:
                 if bid is not None:
                     stats_map[bid] = item.get("total", {})
         
-        logging.info(f"[{acc.name}] Fetched DAY stats for {len(stats_map)} banners")
+        logging.info(f"[{acc.name}] Fetched DAY stats for {len(stats_map)} banners (date_from={today})")
         return stats_map
 
     def _fetch_banner_stats_week(self, acc: AccountInfo, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
@@ -236,9 +241,8 @@ class StatTracker:
         """
         stats_map: Dict[int, Dict[str, Any]] = {}
         
-        # Дата 7 дней назад
-        now = datetime.utcnow() + timedelta(hours=4)
-        date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        # Дата 7 дней назад по UTC+3
+        date_from = (datetime.utcnow() + timedelta(hours=3) - timedelta(days=7)).strftime("%Y-%m-%d")
         
         for i in range(0, len(banner_ids), 200):
             batch = banner_ids[i:i+200]
@@ -249,7 +253,8 @@ class StatTracker:
                 {
                     "id": ids_str,
                     "metrics": "base,uniques,video",
-                    "date_from": date_from
+                    "date_from": date_from,
+                    "attribution": "conversion"
                 }
             )
             
@@ -850,7 +855,8 @@ class StatTracker:
         if not day_stats_map:
             return
         
-        snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
+        snapshot_at = (datetime.utcnow() + timedelta(hours=3)).isoformat()
+        date_from = (datetime.utcnow() + timedelta(hours=3)).strftime("%Y-%m-%d")
         
         records = []
         for ban_id in banner_ids:
@@ -865,6 +871,7 @@ class StatTracker:
             
             records.append({
                 "snapshot_at": snapshot_at,
+                "date_from": date_from,
                 "account_name": acc.name,
                 "id_banner": ban_id,
                 "shows": base.get("shows", 0),
@@ -973,8 +980,8 @@ class StatTracker:
         if not week_stats_map:
             return
         
-        snapshot_at = (datetime.utcnow() + timedelta(hours=4)).isoformat()
-        date_from = (datetime.utcnow() + timedelta(hours=4) - timedelta(days=7)).strftime("%Y-%m-%d")
+        snapshot_at = (datetime.utcnow() + timedelta(hours=3)).isoformat()
+        date_from = (datetime.utcnow() + timedelta(hours=3) - timedelta(days=7)).strftime("%Y-%m-%d")
         
         records = []
         for ban_id in banner_ids:
