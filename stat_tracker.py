@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.2.2"
+VersionStatTracker = "1.2.3"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -29,6 +29,7 @@ os.makedirs(SEGMENTS_DIR, exist_ok=True)
 os.makedirs(USERS_LISTS_DIR, exist_ok=True)
 
 PARQUET_PATH = os.path.join(DATA_DIR, "stat_data.parquet")
+USER_IDS_PATH = os.path.join(BASE_DIR, "user_ids.json")
 
 # ========= ЛОГИ =========
 
@@ -148,6 +149,85 @@ class AccountInfo:
 class StatTracker:
     def __init__(self, accounts: List[AccountInfo]):
         self.accounts = accounts
+        self._user_ids_cache: Optional[Dict[str, Dict[str, Any]]] = None
+
+    def _load_user_ids(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Загружает user_ids.json. Кэширует результат.
+        """
+        if self._user_ids_cache is not None:
+            return self._user_ids_cache
+        
+        if os.path.exists(USER_IDS_PATH):
+            try:
+                with open(USER_IDS_PATH, "r", encoding="utf-8") as f:
+                    self._user_ids_cache = json.load(f)
+                    return self._user_ids_cache
+            except Exception as e:
+                logging.error(f"Failed to load user_ids.json: {e}")
+        
+        self._user_ids_cache = {}
+        return self._user_ids_cache
+    
+    def _save_user_ids(self, user_ids: Dict[str, Dict[str, Any]]):
+        """
+        Сохраняет user_ids.json.
+        """
+        try:
+            with open(USER_IDS_PATH, "w", encoding="utf-8") as f:
+                json.dump(user_ids, f, ensure_ascii=False, indent=2)
+            logging.info(f"Saved user_ids.json with {len(user_ids)} accounts")
+        except Exception as e:
+            logging.error(f"Failed to save user_ids.json: {e}")
+    
+    def _fetch_user_info(self, acc: AccountInfo) -> Optional[Dict[str, Any]]:
+        """
+        Запрашивает /api/v3/user.json?fields=additional_info,id
+        Возвращает {"name": client_name, "id": user_id} или None
+        """
+        data = acc.fetch("/user.json", {"fields": "additional_info,id"}, api_version="v3")
+        
+        if not data:
+            return None
+        
+        user_id = data.get("id")
+        additional_info = data.get("additional_info", {}) or {}
+        client_name = additional_info.get("client_name", "")
+        
+        if user_id is not None:
+            return {
+                "name": client_name,
+                "id": str(user_id)
+            }
+        
+        return None
+    
+    def _ensure_user_ids(self):
+        """
+        Проверяет и дополняет user_ids.json для всех аккаунтов.
+        Запрашивает API только для аккаунтов, которых нет в файле.
+        """
+        user_ids = self._load_user_ids()
+        updated = False
+        
+        for acc in self.accounts:
+            if acc.name in user_ids:
+                logging.debug(f"[{acc.name}] Already in user_ids.json, skipping")
+                continue
+            
+            logging.info(f"[{acc.name}] Fetching user info...")
+            user_info = self._fetch_user_info(acc)
+            
+            if user_info:
+                user_ids[acc.name] = user_info
+                updated = True
+                logging.info(f"[{acc.name}] Added to user_ids.json: {user_info}")
+            else:
+                logging.warning(f"[{acc.name}] Failed to get user info")
+        
+        if updated:
+            self._save_user_ids(user_ids)
+            self._user_ids_cache = user_ids
 
     def _parse_age(self, targetings: Dict[str, Any]) -> str:
         """
@@ -729,6 +809,9 @@ class StatTracker:
         
         В промежутке 21:00-21:30 дополнительно собирает недельную статистику.
         """
+        # Проверяем и дополняем user_ids.json
+        self._ensure_user_ids()
+        
         now = datetime.utcnow() + timedelta(hours=4)
         day_folder = now.strftime("%d_%m_%Y")
         timestamp = now.strftime("%d_%m_%Y_%H-%M-%S")
