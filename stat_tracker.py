@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 
-VersionStatTracker = "1.2.3"
+VersionStatTracker = "1.2.4"
 # ========= БАЗОВЫЕ ПУТИ =========
 
 BASE_DIR = "/opt/stat_tracker"
@@ -147,8 +147,10 @@ class AccountInfo:
 
 
 class StatTracker:
-    def __init__(self, accounts: List[AccountInfo]):
+    def __init__(self, accounts: List[AccountInfo], stat_all_names: Optional[List[str]] = None):
         self.accounts = accounts
+        # Множество имён кабинетов, для которых генерируем stat_all_<n>.csv
+        self._stat_all_names: set = set(stat_all_names) if stat_all_names else set()
         self._user_ids_cache: Optional[Dict[str, Dict[str, Any]]] = None
 
     def _load_user_ids(self) -> Dict[str, Dict[str, Any]]:
@@ -857,6 +859,10 @@ class StatTracker:
                         # Сохраняем предыдущий аккаунт (основная статистика)
                         self._save_account_data(prev_acc, prev_records, day_folder, timestamp)
                         
+                        # Обновляем stat_all CSV (только для указанных кабинетов)
+                        if prev_acc.name in self._stat_all_names:
+                            self._update_stat_all_csv(prev_acc, prev_records)
+                        
                         # Сохраняем banner_ids для недельной статистики
                         if collect_weekly and prev_banner_ids:
                             account_banner_ids[prev_acc.name] = prev_banner_ids
@@ -911,6 +917,10 @@ class StatTracker:
                 
                 prev_records = self._merge_day_stats_to_records(prev_records, day_stats_map)
                 self._save_account_data(prev_acc, prev_records, day_folder, timestamp)
+                
+                # Обновляем stat_all CSV (только для указанных кабинетов)
+                if prev_acc.name in self._stat_all_names:
+                    self._update_stat_all_csv(prev_acc, prev_records)
                 
                 # Сохраняем banner_ids для недельной статистики
                 if collect_weekly and prev_banner_ids:
@@ -1213,6 +1223,138 @@ class StatTracker:
         # Очищаем DataFrame
         del df
         del table
+
+    # ============================================================
+    #   stat_all_{acc_name}.csv  — накопительная таблица баннеров
+    # ============================================================
+
+    # Колонки, которые берутся из stat_<acc>.parquet и попадают в CSV.
+    # Исключаем поминутные faststat-строки (они большие и не нужны в CSV).
+    _STAT_ALL_COLUMNS = [
+        "snapshot_at", "account_name",
+        "id_banner", "name_banner", "status_banner", "created_banner", "updated_banner",
+        "id_group", "name_group", "status_group", "created_group", "updated_group",
+        "id_company", "name_company", "status_company", "created_company", "updated_company",
+        "objective_company", "objective_group",
+        "budget_limit_day_company", "budget_limit_company",
+        "budget_limit_day_group", "budget_limit_group",
+        "max_price_company", "max_price_group", "price_group",
+        "date_start_company", "date_end_company",
+        "date_start_group", "date_end_group",
+        "priced_goal_name_company", "priced_goal_source_id_company",
+        "priced_goal_name_group", "priced_goal_source_id_group",
+        "package_id",
+        "age", "sex", "geo_regions", "interests", "interests_soc_dem",
+        "pads", "segments", "utm", "fulltime_flags",
+        "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+        "title", "text_additional", "text_short", "text_long",
+        "about_company", "cta",
+        "icon_id", "icon_url",
+        "id_image", "image_url",
+        "id_video", "video_url", "video_preview_url", "video_variants",
+        "banner_url", "banner_url_id", "banner_url_object_id", "banner_url_object_type",
+        "shows", "clicks", "spent", "cpm", "cpc", "ctr",
+        "goals", "cpa", "cr",
+        "uniques_total", "uniques_frequency",
+        "clicks_last_30_min", "shows_last_30_min",
+        "viewed_25_percent_rate", "viewed_50_percent_rate",
+        "viewed_75_percent_rate", "viewed_100_percent_rate",
+    ]
+
+    def _update_stat_all_csv(self, acc: AccountInfo, records: List[Dict[str, Any]]):
+        """
+        Создаёт/обновляет stat_all_{acc.name}.csv.
+
+        Логика (memory-efficient):
+        1. Строим DataFrame только из новых записей (нужные колонки).
+        2. Если CSV уже существует — читаем его чанками, пропускаем баннеры,
+           которые есть в новых данных, и записываем остальные в новый файл.
+           Затем дописываем новые строки.
+        3. Атомарная замена через временный файл.
+        """
+        csv_path = os.path.join(DATA_DIR, f"stat_all_{acc.name}.csv")
+        tmp_path = csv_path + ".tmp"
+
+        # --- новые данные ---
+        new_cols = [c for c in self._STAT_ALL_COLUMNS if c in (records[0] if records else {})]
+        # Строим dict: banner_id -> row (только нужные поля)
+        new_rows: Dict[int, Dict[str, Any]] = {}
+        for r in records:
+            bid = r.get("id_banner")
+            if bid is None:
+                continue
+            new_rows[bid] = {c: r.get(c, "") for c in self._STAT_ALL_COLUMNS if c in r}
+
+        if not new_rows:
+            logging.warning(f"[{acc.name}] stat_all: no rows to write, skipping")
+            return
+
+        new_ids = set(new_rows.keys())
+
+        try:
+            if not os.path.exists(csv_path):
+                # --- первая запись: просто сохраняем ---
+                df_new = pd.DataFrame(list(new_rows.values()))
+                df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                logging.info(f"[{acc.name}] Created stat_all CSV: {csv_path} ({len(df_new)} rows)")
+                del df_new
+                return
+
+            # --- CSV уже существует: читаем чанками, фильтруем старые записи ---
+            # Определяем заголовок из существующего файла
+            with open(csv_path, "r", encoding="utf-8-sig") as fh:
+                header_line = fh.readline().strip()
+            existing_cols = header_line.split(",")
+
+            # Финальные колонки — объединение существующих и новых
+            all_cols = list(dict.fromkeys(existing_cols + [c for c in self._STAT_ALL_COLUMNS if c not in existing_cols]))
+
+            first_chunk = True
+            chunk_size = 10_000  # строк за раз → низкое потребление RAM
+
+            with open(tmp_path, "w", encoding="utf-8-sig", newline="") as out_fh:
+                # Пишем заголовок
+                out_fh.write(",".join(all_cols) + "\n")
+
+                # Читаем старый CSV чанками, пропускаем обновлённые баннеры
+                for chunk in pd.read_csv(
+                    csv_path,
+                    encoding="utf-8-sig",
+                    chunksize=chunk_size,
+                    dtype={"id_banner": "Int64"},
+                    low_memory=True,
+                ):
+                    mask = ~chunk["id_banner"].isin(new_ids)
+                    filtered = chunk[mask]
+                    if not filtered.empty:
+                        # Добавляем недостающие колонки
+                        for col in all_cols:
+                            if col not in filtered.columns:
+                                filtered = filtered.copy()
+                                filtered[col] = ""
+                        filtered[all_cols].to_csv(out_fh, index=False, header=False, encoding="utf-8-sig")
+                    del chunk, filtered
+
+                # Дописываем новые/обновлённые строки
+                df_new = pd.DataFrame(list(new_rows.values()))
+                for col in all_cols:
+                    if col not in df_new.columns:
+                        df_new[col] = ""
+                df_new[all_cols].to_csv(out_fh, index=False, header=False, encoding="utf-8-sig")
+                del df_new
+
+            # Атомарная замена
+            os.replace(tmp_path, csv_path)
+            logging.info(f"[{acc.name}] Updated stat_all CSV: {csv_path} ({len(new_ids)} banners refreshed)")
+
+        except Exception as e:
+            logging.error(f"[{acc.name}] Failed to update stat_all CSV: {e}")
+            # Убираем временный файл если остался
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def collect_data(self) -> pd.DataFrame:
         """Старый метод для совместимости - собирает все в один DataFrame"""
@@ -1626,6 +1768,7 @@ class AudienceTracker:
 
 
 def load_accounts_from_env() -> List[AccountInfo]:
+    """Устаревший метод - оставлен для совместимости. Используйте load_accounts_from_json."""
     accounts: List[AccountInfo] = []
     i = 1
     while True:
@@ -1643,164 +1786,79 @@ def load_accounts_from_env() -> List[AccountInfo]:
     return accounts
 
 
-if __name__ == "__main__":
-    ACCOUNTS = [
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MAIN_1"),
-            name="MAIN_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MAIN_4"),
-            name="MAIN_4",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MAIN_5"),
-            name="MAIN_5",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_1"),
-            name="ZEL_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_2"),
-            name="ZEL_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_3"),
-            name="ZEL_3",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_5"),
-            name="ZEL_5",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_6"),
-            name="ZEL_6",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_7"),
-            name="ZEL_7",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_8"),
-            name="ZEL_8",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ZEL_9"),
-            name="ZEL_9",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ROM_1"),
-            name="ROM_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ROM_2"),
-            name="ROM_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_1"),
-            name="GUZ_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_2"),
-            name="GUZ_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_3"),
-            name="GUZ_3",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_4"),
-            name="GUZ_4",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_5"),
-            name="GUZ_5",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_6"),
-            name="GUZ_6",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_GUZ_7"),
-            name="GUZ_7",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ALE_1"),
-            name="ALE_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ALE_2"),
-            name="ALE_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_ALE_3"),
-            name="ALE_3",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_1"),
-            name="NIKOLAY_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_2"),
-            name="NIKOLAY_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_3"),
-            name="NIKOLAY_3",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_4"),
-            name="NIKOLAY_4",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_5"),
-            name="NIKOLAY_5",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_6"),
-            name="NIKOLAY_6",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_NIKOLAY_7"),
-            name="NIKOLAY_7",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_OLYA_1"),
-            name="OLYA_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_OLYA_2"),
-            name="OLYA_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MISHUSTIN_1"),
-            name="MISHUSTIN_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MISHUSTIN_2"),
-            name="MISHUSTIN_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_MISHUSTIN_3"),
-            name="MISHUSTIN_3",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_VESELOV_1"),
-            name="VESELOV_1",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_VESELOV_2"),
-            name="VESELOV_2",
-        ),
-        AccountInfo(
-            token=os.getenv("VK_TOKEN_VESELOV_3"),
-            name="VESELOV_3",
-        ),
+# ========= ПУТИ К JSON С КАБИНЕТАМИ =========
+
+ACCOUNTS_JSON_PATH = os.path.join(BASE_DIR, "accounts.json")
+STAT_ALL_ACCOUNTS_JSON_PATH = os.path.join(BASE_DIR, "accounts_stat_all.json")
+
+
+def load_accounts_from_json(json_path: str = ACCOUNTS_JSON_PATH) -> List[AccountInfo]:
+    """
+    Загружает кабинеты и токены из JSON-файла.
+
+    Формат accounts.json:
+    [
+      {"name": "MAIN_1", "token": "vk1.a.xxx..."},
+      {"name": "ZEL_1",  "token": "vk1.a.yyy..."}
     ]
+    """
+    if not os.path.exists(json_path):
+        logging.error(f"accounts.json not found: {json_path}")
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        accounts = []
+        for entry in data:
+            name = entry.get("name", "")
+            token = entry.get("token", "")
+            if not name or not token:
+                logging.warning(f"Skipping invalid entry in accounts.json: {entry}")
+                continue
+            accounts.append(AccountInfo(token=token, name=name))
+        logging.info(f"Loaded {len(accounts)} accounts from {json_path}")
+        return accounts
+    except Exception as e:
+        logging.error(f"Failed to load accounts from {json_path}: {e}")
+        return []
+
+
+def load_stat_all_account_names(json_path: str = STAT_ALL_ACCOUNTS_JSON_PATH) -> List[str]:
+    """
+    Загружает список имён кабинетов, для которых нужно генерировать stat_all_<name>.csv.
+
+    Формат accounts_stat_all.json:
+    [
+      {"name": "MAIN_1"},
+      {"name": "ZEL_1"}
+    ]
+    """
+    if not os.path.exists(json_path):
+        logging.warning(f"accounts_stat_all.json not found: {json_path}. stat_all CSV will not be generated.")
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        names = [entry["name"] for entry in data if entry.get("name")]
+        logging.info(f"stat_all CSV will be generated for {len(names)} accounts: {names}")
+        return names
+    except Exception as e:
+        logging.error(f"Failed to load accounts_stat_all.json from {json_path}: {e}")
+        return []
+
+
+if __name__ == "__main__":
+    # ===== ЗАГРУЗКА КАБИНЕТОВ ИЗ JSON =====
+    ACCOUNTS = load_accounts_from_json(ACCOUNTS_JSON_PATH)
+    if not ACCOUNTS:
+        logging.error("No accounts loaded. Exiting.")
+        exit(1)
+
+    # ===== СПИСОК КАБИНЕТОВ ДЛЯ stat_all CSV =====
+    STAT_ALL_NAMES = load_stat_all_account_names(STAT_ALL_ACCOUNTS_JSON_PATH)
 
     # ===== ОСНОВНОЙ СБОР СТАТИСТИКИ (по аккаунтам) =====
-    tracker = StatTracker(ACCOUNTS)
+    tracker = StatTracker(ACCOUNTS, stat_all_names=STAT_ALL_NAMES)
     tracker.collect_and_save_per_account()
     logging.info("Stat tracking completed.")
     
